@@ -1,4 +1,5 @@
 # MinIO 视频文件库
+MinIO Browser (for yyt server)
 
 基于 MinIO S3 协议的视频浏览/播放/下载 Web 项目，支持目录浏览和业务三级分类。
 
