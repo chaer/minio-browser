@@ -1,0 +1,311 @@
+import os
+import json
+import urllib.parse
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from minio import Minio
+from minio.error import S3Error
+
+app = FastAPI(title="MinIO 视频文件库")
+
+# ================= 配置 =================
+MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
+MINIO_SECURE     = os.getenv("MINIO_SECURE", "false").lower() == "true"
+MINIO_BUCKET     = os.getenv("MINIO_BUCKET", "video")
+METADATA_PATH    = os.getenv("METADATA_PATH", "/app/data/metadata.json")
+FILE_URL_PREFIX  = os.getenv("FILE_URL_PREFIX", "")
+
+client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=MINIO_SECURE,
+)
+
+# ================= 元数据索引 =================
+METADATA: dict[str, dict] = {}
+_metadata_mtime: float = 0.0
+
+
+def _to_object(url: str) -> str:
+    if not url:
+        return ""
+    if FILE_URL_PREFIX and url.startswith(FILE_URL_PREFIX):
+        return url[len(FILE_URL_PREFIX):]
+    return url
+
+
+def _load_metadata() -> None:
+    global METADATA
+    p = Path(METADATA_PATH)
+    if not p.exists():
+        print(f"[warn] metadata not found: {p}")
+        METADATA = {}
+        return
+    try:
+        items = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[error] failed to load metadata: {e}")
+        return
+    m: dict[str, dict] = {}
+    for it in items:
+        obj = _to_object(it.get("file_url", ""))
+        if obj:
+            m[obj] = it
+    METADATA = m
+    print(f"[info] loaded {len(METADATA)} metadata entries from {p}")
+
+
+def maybe_reload_metadata() -> None:
+    global _metadata_mtime
+    p = Path(METADATA_PATH)
+    if not p.exists():
+        return
+    mtime = p.stat().st_mtime
+    if mtime != _metadata_mtime:
+        _metadata_mtime = mtime
+        _load_metadata()
+
+
+maybe_reload_metadata()
+
+
+# ================= 工具 =================
+def _guess_content_type(name: str) -> str:
+    ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+    return {
+        "mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
+        "avi": "video/x-msvideo", "mkv": "video/x-matroska",
+        "mp3": "audio/mpeg", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "gif": "image/gif",
+    }.get(ext, "application/octet-stream")
+
+
+def _cover_of(obj_name: str, meta: dict) -> str:
+    cover = _to_object(meta.get("cover_url", ""))
+    if cover:
+        return cover
+    return obj_name.rsplit(".", 1)[0] + ".jpg"
+
+
+# ================= API =================
+@app.get("/api/info")
+def info():
+    maybe_reload_metadata()
+    return {
+        "bucket": MINIO_BUCKET,
+        "endpoint": MINIO_ENDPOINT,
+        "metadata_count": len(METADATA),
+        "metadata_path": METADATA_PATH,
+        "file_url_prefix": FILE_URL_PREFIX,
+    }
+
+
+@app.get("/api/objects")
+def list_objects(prefix: str = Query("")):
+    """列出 MinIO 指定前缀下的目录和文件（非递归）。"""
+    maybe_reload_metadata()
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    try:
+        objects = client.list_objects(MINIO_BUCKET, prefix=prefix, recursive=False)
+        dirs: list[str] = []
+        files: list[dict] = []
+        for obj in objects:
+            if obj.is_dir:
+                dirs.append(obj.object_name)
+            else:
+                meta = METADATA.get(obj.object_name, {})
+                files.append({
+                    "name": obj.object_name,
+                    "size": obj.size,
+                    "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
+                    "cover_object": _cover_of(obj.object_name, meta),
+                    "title": meta.get("title") or meta.get("file_name") or "",
+                    "cate_2": (meta.get("cate_2_name") or {}).get("title", ""),
+                    "cate_3": (meta.get("cate_3_name") or {}).get("title", ""),
+                    "real_name": meta.get("real_name", ""),
+                    "duration": meta.get("duration"),
+                })
+        return {
+            "dirs": sorted(dirs),
+            "files": sorted(files, key=lambda x: x["name"]),
+        }
+    except S3Error as e:
+        raise HTTPException(500, f"MinIO error: {e}")
+
+
+@app.get("/api/categories")
+def categories():
+    """返回三级分类树，叶子带文件数。"""
+    maybe_reload_metadata()
+    tree: dict = {}
+    for meta in METADATA.values():
+        c1 = meta.get("cate_1_name") or {}
+        c2 = meta.get("cate_2_name") or {}
+        c3 = meta.get("cate_3_name") or {}
+
+        n1 = tree.setdefault(
+            c1.get("id", 0),
+            {"id": c1.get("id", 0), "title": c1.get("title") or "未分类", "count": 0, "children": {}},
+        )
+        n1["count"] += 1
+
+        if c2.get("id"):
+            n2 = n1["children"].setdefault(
+                c2["id"],
+                {"id": c2["id"], "title": c2.get("title", ""), "count": 0, "children": {}},
+            )
+            n2["count"] += 1
+
+            if c3.get("id"):
+                n3 = n2["children"].setdefault(
+                    c3["id"],
+                    {"id": c3["id"], "title": c3.get("title", ""), "count": 0, "children": {}},
+                )
+                n3["count"] += 1
+
+    def to_list(node: dict) -> dict:
+        return {
+            "id": node["id"],
+            "title": node["title"],
+            "count": node["count"],
+            "children": [to_list(c) for c in node["children"].values()],
+        }
+
+    return {"tree": [to_list(n) for n in tree.values()]}
+
+
+@app.get("/api/objects/by_category")
+def objects_by_category(
+    cate1_id: int = Query(0),
+    cate2_id: int = Query(0),
+    cate3_id: int = Query(0),
+    page: int = Query(1, ge=1),
+    pagesize: int = Query(60, ge=1, le=200),
+):
+    """按分类过滤，返回带封面的文件列表（分页）。"""
+    maybe_reload_metadata()
+    matched: list[tuple[str, dict]] = []
+    for obj, meta in METADATA.items():
+        c1 = (meta.get("cate_1_name") or {}).get("id", 0)
+        c2 = (meta.get("cate_2_name") or {}).get("id", 0)
+        c3 = (meta.get("cate_3_name") or {}).get("id", 0)
+        if cate1_id and c1 != cate1_id:
+            continue
+        if cate2_id and c2 != cate2_id:
+            continue
+        if cate3_id and c3 != cate3_id:
+            continue
+        matched.append((obj, meta))
+
+    matched.sort(key=lambda x: x[1].get("create_time", ""), reverse=True)
+    total = len(matched)
+    start = (page - 1) * pagesize
+    page_items = matched[start:start + pagesize]
+
+    items = []
+    for obj, meta in page_items:
+        items.append({
+            "object_name": obj,
+            "cover_object": _cover_of(obj, meta),
+            "title": meta.get("title") or meta.get("file_name") or obj.split("/")[-1],
+            "file_name": meta.get("file_name") or "",
+            "duration": meta.get("duration"),
+            "file_size": meta.get("file_size"),
+            "real_name": meta.get("real_name") or "",
+            "team_name": meta.get("team_name") or "",
+            "group_name": meta.get("group_name") or "",
+            "shoot_time": meta.get("shoot_time") or "",
+            "create_time": meta.get("create_time") or "",
+            "cate_1": (meta.get("cate_1_name") or {}).get("title", ""),
+            "cate_2": (meta.get("cate_2_name") or {}).get("title", ""),
+            "cate_3": (meta.get("cate_3_name") or {}).get("title", ""),
+            "public_labels": [t.get("tag_title", "") for t in (meta.get("public_labels") or [])],
+        })
+
+    return {"total": total, "page": page, "pagesize": pagesize, "items": items}
+
+
+@app.get("/api/preview")
+def preview(object: str, request: Request):
+    """流式代理，支持 HTTP Range，可拖动进度条。"""
+    try:
+        stat = client.stat_object(MINIO_BUCKET, object)
+        file_size = stat.size
+        range_header = request.headers.get("range")
+
+        start, end = 0, file_size - 1
+        status_code = 200
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Type": _guess_content_type(object),
+            "Content-Disposition": f'inline; filename="{urllib.parse.quote(object.split("/")[-1])}"',
+        }
+
+        if range_header:
+            try:
+                rng = range_header.replace("bytes=", "").split("-")
+                start = int(rng[0]) if rng[0] else 0
+                end = int(rng[1]) if len(rng) > 1 and rng[1] else file_size - 1
+            except ValueError:
+                raise HTTPException(416, "Invalid Range")
+            if start >= file_size:
+                raise HTTPException(416, "Range Not Satisfiable")
+            end = min(end, file_size - 1)
+            status_code = 206
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+        headers["Content-Length"] = str(end - start + 1)
+        resp = client.get_object(MINIO_BUCKET, object, offset=start, length=end - start + 1)
+
+        def iterfile():
+            try:
+                for chunk in resp.stream(64 * 1024):
+                    yield chunk
+            finally:
+                resp.close()
+                resp.release_conn()
+
+        return StreamingResponse(
+            iterfile(),
+            status_code=status_code,
+            headers=headers,
+            media_type=headers["Content-Type"],
+        )
+    except S3Error as e:
+        raise HTTPException(404, f"object not found: {object} ({e})")
+
+
+@app.get("/api/download")
+def download(object: str):
+    try:
+        resp = client.get_object(MINIO_BUCKET, object)
+        filename = object.split("/")[-1]
+
+        def iterfile():
+            try:
+                for chunk in resp.stream(64 * 1024):
+                    yield chunk
+            finally:
+                resp.close()
+                resp.release_conn()
+
+        return StreamingResponse(
+            iterfile(),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{urllib.parse.quote(filename)}"'
+            },
+        )
+    except S3Error as e:
+        raise HTTPException(404, f"object not found: {object} ({e})")
+
+
+# ================= 静态资源（必须放最后） =================
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")

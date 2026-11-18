@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频文件库</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .facet-item { padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 13px; color: #374151; display: flex; align-items: center; gap: 6px; }
+  .facet-item:hover { background: #f3f4f6; }
+  .facet-item.active { background: #dbeafe; color: #1e40af; font-weight: 500; }
+  .facet-item .count { color: #9ca3af; font-size: 11px; margin-left: auto; flex-shrink: 0; }
+  .toggle-icon { width: 14px; display: inline-block; text-align: center; font-size: 10px; color: #9ca3af; flex-shrink: 0; }
+  .cat-l2 { padding-left: 26px; font-size: 12.5px; }
+  .cat-l3 { padding-left: 44px; font-size: 12px; color: #4b5563; }
+  .section-title { padding: 8px 10px 4px; font-size: 11px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; }
+  .media-card, .dir-card { transition: box-shadow .15s ease; }
+  .media-card:hover, .dir-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+  .tag-chip { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 11px; background: #f3f4f6; color: #374151; cursor: pointer; white-space: nowrap; }
+  .tag-chip:hover { background: #e5e7eb; }
+  .tag-chip.active { background: #dbeafe; color: #1e40af; font-weight: 500; }
+  .breadcrumb-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #eff6ff; color: #1e40af; }
+  .breadcrumb-chip .x { cursor: pointer; opacity: .6; font-weight: bold; }
+  .breadcrumb-chip .x:hover { opacity: 1; }
+</style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div class="flex min-h-screen">
+
+  <!-- 侧边栏 -->
+  <aside class="w-80 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+    <div class="p-4 border-b border-gray-200">
+      <h1 class="text-lg font-bold text-gray-800">🎬 视频文件库</h1>
+      <p id="bucketInfo" class="text-xs text-gray-500 mt-1">加载中…</p>
+    </div>
+
+    <div class="p-3 border-b border-gray-200">
+      <input id="searchInput" type="text" placeholder="搜索标题 / 文件名 / 作者 / 产品…"
+             class="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+    </div>
+
+    <div class="p-2 border-b border-gray-200">
+      <button id="btnDirMode" class="facet-item w-full active">
+        <span>📂</span><span class="flex-1 text-left">全部文件（目录）</span>
+      </button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto">
+      <!-- 视频类型 -->
+      <div class="section-title">🎬 视频类型</div>
+      <div id="vtList" class="px-2 pb-2 space-y-0.5"></div>
+
+      <!-- 业务分类 -->
+      <div class="section-title">📁 业务分类</div>
+      <div id="cateTree" class="px-2 pb-2 space-y-0.5"></div>
+
+      <!-- 标签 -->
+      <div class="section-title">🏷 标签</div>
+      <div id="labelList" class="px-2 pb-2 flex flex-wrap gap-1.5"></div>
+    </div>
+  </aside>
+
+  <!-- 主区域 -->
+  <main class="flex-1 flex flex-col min-w-0">
+    <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between gap-4">
+      <div id="breadcrumb" class="text-sm text-gray-600 truncate flex-1"></div>
+      <div id="pageInfo" class="text-sm text-gray-500 flex-shrink-0"></div>
+    </header>
+    <div class="flex-1 p-6 overflow-auto">
+      <div id="fileGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4"></div>
+      <div id="pagination" class="mt-6 flex justify-center gap-2"></div>
+    </div>
+  </main>
+</div>
+
+<!-- 预览模态框 -->
+<div id="modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
+  <div class="bg-white rounded-lg overflow-hidden max-w-4xl w-full mx-4">
+    <div class="flex justify-between items-center p-3 border-b gap-4">
+      <span id="modalTitle" class="font-medium truncate"></span>
+      <button id="modalClose" class="text-gray-500 hover:text-gray-800 text-2xl leading-none flex-shrink-0">&times;</button>
+    </div>
+    <video id="videoPlayer" controls class="w-full max-h-[70vh] bg-black hidden"></video>
+    <div id="audioWrap" class="hidden p-6 bg-gray-900">
+      <div class="flex flex-col items-center gap-4">
+        <div class="text-6xl">🎵</div>
+        <audio id="audioPlayer" controls class="w-full max-w-lg"></audio>
+      </div>
+    </div>
+    <img id="imageViewer" class="w-full max-h-[70vh] object-contain bg-black hidden" alt="">
+  </div>
+</div>
+
+<script>
+const state = {
+  mode: "dir",          // "dir" | "filter"
+  prefix: "",
+  filters: {
+    video_type: 0,
+    cate1_id: 0, cate2_id: 0, cate3_id: 0,
+    label_id: 0,
+  },
+  search: "",
+  page: 1,
+  pagesize: 60,
+  facets: null,
+  expanded: new Set(),  // 展开的 cate1 id
+  facetMtime: 0,        // 重新加载 facets 的标记
+};
+
+// ================= 工具 =================
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+function fmtSize(b) {
+  if (!b) return "0 B";
+  if (b < 1024) return b + " B";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
+  return (b / 1073741824).toFixed(2) + " GB";
+}
+function fmtDuration(s) {
+  if (!s) return "";
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+               : `${m}:${String(sec).padStart(2, "0")}`;
+}
+function getFileKind(name) {
+  const ext = (String(name).split(".").pop() || "").toLowerCase();
+  if (["mp4","webm","mov","avi","mkv","m4v","flv","ts","wmv"].includes(ext)) return "video";
+  if (["mp3","wav","m4a","aac","ogg","flac","opus","wma"].includes(ext)) return "audio";
+  if (["jpg","jpeg","png","gif","webp","bmp","svg","avif"].includes(ext)) return "image";
+  return "other";
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json();
+}
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// ================= 初始化 =================
+async function init() {
+  try {
+    const info = await getJSON("/api/info");
+    document.getElementById("bucketInfo").textContent =
+      `bucket: ${info.bucket} · 元数据 ${info.metadata_count} 条`;
+  } catch (e) {
+    document.getElementById("bucketInfo").textContent = "初始化失败";
+  }
+
+  await reloadFacets();
+  showDirMode("");
+}
+
+async function reloadFacets() {
+  try {
+    const vt = state.filters.video_type || 0;
+    state.facets = await getJSON(`/api/facets?video_type=${vt}`);
+    renderVtList();
+    renderCateTree();
+    renderLabelList();
+  } catch (e) {
+    console.error("facets load failed", e);
+  }
+}
+
+// ================= 视频类型列表 =================
+function renderVtList() {
+  const box = document.getElementById("vtList");
+  if (!state.facets) return;
+  const allCount = state.facets.video_types.reduce((a, b) => a + b.count, 0);
+  let html = `<div class="facet-item ${state.filters.video_type === 0 ? "active" : ""}" data-vt="0">
+    <span>全部</span><span class="count">${allCount}</span></div>`;
+  for (const vt of state.facets.video_types) {
+    const active = state.filters.video_type === vt.id ? "active" : "";
+    html += `<div class="facet-item ${active}" data-vt="${vt.id}">
+      <span class="flex-1 truncate">${esc(vt.label)}</span>
+      <span class="count">${vt.count}</span></div>`;
+  }
+  box.innerHTML = html;
+}
+
+// ================= 分类树 =================
+function renderCateTree() {
+  const box = document.getElementById("cateTree");
+  if (!state.facets) { box.innerHTML = ""; return; }
+  const cats = state.facets.categories || [];
+  if (!cats.length) {
+    box.innerHTML = '<p class="text-xs text-gray-400 px-3 py-2">暂无分类数据</p>';
+    return;
+  }
+  box.innerHTML = cats.map(c1 => renderCateNode(c1, 1)).join("");
+}
+
+function renderCateNode(node, level) {
+  const f = state.filters;
+  const hasChildren = node.children && node.children.length > 0;
+  const isExpanded = level === 1 ? (!state.expanded.has(-node.id) || state.expanded.has(node.id))
+                                 : state.expanded.has(node.id);
+  // 简单策略：cate1 默认展开，其它默认折叠
+  const expanded = level === 1 ? true : state.expanded.has(node.id);
+
+  const isActive = (
+    (level === 1 && f.cate1_id === node.id) ||
+    (level === 2 && f.cate2_id === node.id) ||
+    (level === 3 && f.cate3_id === node.id)
+  );
+
+  const levelCls = level === 1 ? "" : level === 2 ? "cat-l2" : "cat-l3";
+  const toggleIcon = hasChildren
+    ? `<span class="toggle-icon" data-toggle="${node.id}">${expanded ? "▾" : "▸"}</span>`
+    : `<span class="toggle-icon"></span>`;
+
+  let html = `
+    <div class="facet-item ${levelCls} ${isActive ? "active" : ""}"
+         data-level="${level}" data-id="${node.id}">
+      ${toggleIcon}
+      <span class="flex-1 truncate" title="${esc(node.title)}">${esc(node.title)}</span>
+      <span class="count">${node.count}</span>
+    </div>`;
+
+  if (hasChildren && expanded) {
+    html += node.children.map(c => renderCateNode(c, level + 1)).join("");
+  }
+  return html;
+}
+
+// ================= 标签 =================
+function renderLabelList() {
+  const box = document.getElementById("labelList");
+  if (!state.facets) return;
+  const labels = state.facets.labels || [];
+  if (!labels.length) {
+    box.innerHTML = '<p class="text-xs text-gray-400 px-1">暂无标签</p>';
+    return;
+  }
+  box.innerHTML = labels.slice(0, 40).map(l => {
+    const active = state.filters.label_id === l.id ? "active" : "";
+    return `<span class="tag-chip ${active}" data-label="${l.id}" title="${esc(l.title)}">${esc(l.title)} · ${l.count}</span>`;
+  }).join("");
+}
+
+// ================= 目录模式 =================
+async function showDirMode(prefix) {
+  state.mode = "dir";
+  state.prefix = prefix || "";
+  document.getElementById("pagination").innerHTML = "";
+  document.getElementById("btnDirMode").classList.add("active");
+
+  let data;
+  try {
+    data = await getJSON(`/api/objects?prefix=${encodeURIComponent(state.prefix)}`);
+  } catch (e) {
+    document.getElementById("fileGrid").innerHTML =
+      `<p class="text-red-500 col-span-full text-center py-12">目录加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+
+  renderDirBreadcrumb(state.prefix);
+  document.getElementById("pageInfo").textContent =
+    `${data.dirs.length} 个目录 · ${data.files.length} 个文件`;
+
+  const grid = document.getElementById("fileGrid");
+  let html = "";
+  for (const dir of data.dirs) {
+    const name = dir.slice(state.prefix.length).replace(/\/$/, "");
+    html += `
+      <div class="dir-card cursor-pointer bg-white rounded-lg border border-gray-200 p-4 flex flex-col items-center justify-center h-40"
+           data-prefix="${esc(dir)}">
+        <div class="text-4xl mb-2">📁</div>
+        <div class="text-sm font-medium text-gray-700 truncate w-full text-center" title="${esc(name)}">${esc(name)}</div>
+      </div>`;
+  }
+  for (const f of data.files) {
+    html += mediaCard({
+      object_name: f.name,
+      cover_object: f.cover_object,
+      title: f.title || f.name.split("/").pop(),
+      cate_2: f.cate_2, cate_3: f.cate_3, real_name: f.real_name,
+      duration: f.duration, file_size: f.size,
+    });
+  }
+  grid.innerHTML = html || `<p class="text-gray-500 col-span-full text-center py-12">空目录</p>`;
+}
+
+function renderDirBreadcrumb(prefix) {
+  const parts = prefix.split("/").filter(Boolean);
+  let html = `<a href="#" data-dir="" class="text-blue-600 hover:underline">🏠 根目录</a>`;
+  let path = "";
+  for (const p of parts) {
+    path += p + "/";
+    html += `<span class="mx-1 text-gray-400">/</span>
+      <a href="#" data-dir="${esc(path)}" class="text-blue-600 hover:underline">${esc(p)}</a>`;
+  }
+  document.getElementById("breadcrumb").innerHTML = html;
+}
+
+// ================= 过滤模式 =================
+async function loadFilter(page = 1) {
+  state.mode = "filter";
+  state.page = page;
+  document.getElementById("btnDirMode").classList.remove("active");
+
+  const qs = new URLSearchParams({
+    video_type: state.filters.video_type || 0,
+    cate1_id: state.filters.cate1_id || 0,
+    cate2_id: state.filters.cate2_id || 0,
+    cate3_id: state.filters.cate3_id || 0,
+    label_id: state.filters.label_id || 0,
+    search: state.search || "",
+    page,
+    pagesize: state.pagesize,
+  });
+
+  let data;
+  try {
+    data = await getJSON(`/api/objects/filter?${qs}`);
+  } catch (e) {
+    document.getElementById("fileGrid").innerHTML =
+      `<p class="text-red-500 col-span-full text-center py-12">加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+
+  renderFilterBreadcrumb();
+  document.getElementById("pageInfo").textContent =
+    `共 ${data.total} 个 · 第 ${data.page} 页`;
+
+  const grid = document.getElementById("fileGrid");
+  grid.innerHTML = data.items.length
+    ? data.items.map(mediaCard).join("")
+    : `<p class="text-gray-500 col-span-full text-center py-12">该条件下没有文件</p>`;
+
+  renderPagination(data.total, data.page, data.pagesize);
+}
+
+function renderFilterBreadcrumb() {
+  const f = state.filters;
+  const parts = [];
+
+  if (f.video_type) {
+    const vt = (state.facets?.video_types || []).find(x => x.id === f.video_type);
+    if (vt) parts.push({ label: `🎬 ${vt.label}`, clear: () => {
+      f.video_type = 0; f.cate1_id = 0; f.cate2_id = 0; f.cate3_id = 0; f.label_id = 0;
+      reloadFacets().then(() => loadFilter(1));
+    }});
+  }
+
+  if (f.cate1_id && state.facets) {
+    const c1 = (state.facets.categories || []).find(x => x.id === f.cate1_id);
+    if (c1) parts.push({ label: `📁 ${c1.title}`, clear: () => {
+      f.cate1_id = 0; f.cate2_id = 0; f.cate3_id = 0;
+      reloadFacets().then(() => loadFilter(1));
+    }});
+  }
+
+  if (f.cate2_id && state.facets) {
+    for (const c1 of (state.facets.categories || [])) {
+      const c2 = (c1.children || []).find(x => x.id === f.cate2_id);
+      if (c2) { parts.push({ label: `📁 ${c2.title}`, clear: () => {
+        f.cate2_id = 0; f.cate3_id = 0;
+        loadFilter(1);
+      }}); break; }
+    }
+  }
+
+  if (f.cate3_id && state.facets) {
+    for (const c1 of (state.facets.categories || [])) {
+      for (const c2 of (c1.children || [])) {
+        const c3 = (c2.children || []).find(x => x.id === f.cate3_id);
+        if (c3) { parts.push({ label: `📁 ${c3.title}`, clear: () => {
+          f.cate3_id = 0; loadFilter(1);
+        }}); break; }
+      }
+    }
+  }
+
+  if (f.label_id && state.facets) {
+    const lb = (state.facets.labels || []).find(x => x.id === f.label_id);
+    if (lb) parts.push({ label: `🏷 ${lb.title}`, clear: () => {
+      f.label_id = 0; loadFilter(1);
+    }});
+  }
+
+  if (state.search) {
+    parts.push({ label: `🔍 "${state.search}"`, clear: () => {
+      state.search = "";
+      document.getElementById("searchInput").value = "";
+      loadFilter(1);
+    }});
+  }
+
+  const box = document.getElementById("breadcrumb");
+  if (!parts.length) {
+    box.innerHTML = `<span class="text-gray-400">未设置筛选条件（显示全部）</span>`;
+    return;
+  }
+  box.innerHTML = parts.map((p, i) =>
+    `<span class="breadcrumb-chip mr-2 mb-1">${esc(p.label)}
+       <span class="x" data-clear="${i}">×</span></span>`
+  ).join("") + `<button class="text-xs text-gray-500 hover:text-gray-800 ml-2" data-clear-all>清除全部</button>`;
+
+  box.querySelectorAll("[data-clear]").forEach(el => {
+    el.addEventListener("click", e => {
+      e.stopPropagation();
+      const idx = +el.dataset.clear;
+      parts[idx].clear();
+    });
+  });
+  const clearAllBtn = box.querySelector("[data-clear-all]");
+  if (clearAllBtn) clearAllBtn.addEventListener("click", clearAllFilters);
+}
+
+function clearAllFilters() {
+  state.filters = {
+    video_type: 0, cate1_id: 0, cate2_id: 0, cate3_id: 0, label_id: 0,
+  };
+  state.search = "";
+  document.getElementById("searchInput").value = "";
+  reloadFacets().then(() => loadFilter(1));
+}
+
+// ================= 分页 =================
+function renderPagination(total, page, size) {
+  const pages = Math.ceil(total / size);
+  const box = document.getElementById("pagination");
+  if (pages <= 1) { box.innerHTML = ""; return; }
+  box.innerHTML = `
+    <button data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}
+      class="px-3 py-1.5 border rounded text-sm bg-white disabled:opacity-40">上一页</button>
+    <span class="px-3 py-1.5 text-sm text-gray-600">${page} / ${pages}</span>
+    <button data-page="${page + 1}" ${page >= pages ? "disabled" : ""}
+      class="px-3 py-1.5 border rounded text-sm bg-white disabled:opacity-40">下一页</button>`;
+}
+
+// ================= 媒体卡片 =================
+function mediaCard(f) {
+  const objectName = f.object_name || "";
+  const name = f.title || objectName.split("/").pop();
+  const kind = getFileKind(objectName);
+  const dur = fmtDuration(f.duration);
+  const size = fmtSize(f.file_size || 0);
+
+  const vtLabel = f.video_type_label || "";
+  const subParts = [f.cate_2, f.cate_3, vtLabel, dur, size].filter(Boolean);
+  const sub = subParts.join(" · ");
+
+  const coverUrl = f.cover_object
+    ? `/api/preview?object=${encodeURIComponent(f.cover_object)}`
+    : "";
+
+  let previewHtml = "";
+  let overlayHtml = "";
+  let badgeHtml = "";
+
+  if (kind === "video") {
+    previewHtml = coverUrl
+      ? `<img src="${coverUrl}" loading="lazy" class="w-full h-full object-cover" onerror="this.style.display='none'">`
+      : "";
+    overlayHtml = `<div class="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/50 transition"><span class="text-white text-4xl drop-shadow">▶️</span></div>`;
+    if (dur) badgeHtml = `<span class="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">${esc(dur)}</span>`;
+  } else if (kind === "audio") {
+    previewHtml = coverUrl
+      ? `<img src="${coverUrl}" loading="lazy" class="w-full h-full object-cover opacity-80" onerror="this.style.display='none'">`
+      : `<div class="w-full h-full flex items-center justify-center bg-gradient-to-br from-indigo-500 to-purple-600"><span class="text-6xl">🎵</span></div>`;
+    overlayHtml = `<div class="absolute inset-0 flex items-center justify-center bg-black/10 hover:bg-black/50 transition"><span class="text-white text-4xl drop-shadow">🎧</span></div>`;
+    if (dur) badgeHtml = `<span class="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">${esc(dur)}</span>`;
+  } else if (kind === "image") {
+    previewHtml = `<img src="/api/preview?object=${encodeURIComponent(objectName)}" loading="lazy" class="w-full h-full object-cover">`;
+  } else {
+    previewHtml = `<div class="w-full h-full flex items-center justify-center bg-gray-200"><span class="text-6xl">📄</span></div>`;
+    overlayHtml = `<div class="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/40 transition"><span class="text-white text-3xl drop-shadow">⬇️</span></div>`;
+  }
+
+  const tags = (f.public_labels || []).slice(0, 3)
+    .map(t => `<span class="inline-block bg-blue-50 text-blue-600 text-xs px-1.5 py-0.5 rounded mr-1">${esc(t)}</span>`)
+    .join("");
+
+  return `
+    <div class="media-card group bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col cursor-pointer"
+         data-object="${esc(objectName)}" data-title="${esc(name)}" data-kind="${kind}">
+      <div class="relative aspect-video bg-gray-900 overflow-hidden">
+        ${previewHtml}${overlayHtml}${badgeHtml}
+      </div>
+      <div class="p-3">
+        <div class="text-sm font-medium text-gray-800 truncate" title="${esc(name)}">${esc(name)}</div>
+        ${sub ? `<div class="text-xs text-gray-500 mt-1 truncate">${esc(sub)}</div>` : ""}
+        ${tags ? `<div class="mt-1.5">${tags}</div>` : ""}
+        ${f.real_name ? `<div class="text-xs text-gray-400 mt-0.5 truncate">👤 ${esc(f.real_name)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+// ================= 事件：侧边栏 =================
+document.getElementById("btnDirMode").addEventListener("click", () => {
+  clearAllFilters();
+  showDirMode("");
+});
+
+document.getElementById("vtList").addEventListener("click", e => {
+  const el = e.target.closest("[data-vt]");
+  if (!el) return;
+  const vt = +el.dataset.vt;
+  state.filters.video_type = vt;
+  // 切换类型时清空分类和标签，避免无效组合
+  state.filters.cate1_id = 0;
+  state.filters.cate2_id = 0;
+  state.filters.cate3_id = 0;
+  state.filters.label_id = 0;
+  reloadFacets().then(() => loadFilter(1));
+});
+
+document.getElementById("cateTree").addEventListener("click", e => {
+  // 展开/折叠
+  const toggle = e.target.closest("[data-toggle]");
+  if (toggle) {
+    e.stopPropagation();
+    const id = +toggle.dataset.toggle;
+    if (state.expanded.has(id)) state.expanded.delete(id);
+    else state.expanded.add(id);
+    renderCateTree();
+    return;
+  }
+  // 选择分类
+  const el = e.target.closest("[data-level][data-id]");
+  if (!el) return;
+  const level = +el.dataset.level;
+  const id = +el.dataset.id;
+  const f = state.filters;
+
+  if (level === 1) {
+    if (f.cate1_id === id) { f.cate1_id = 0; f.cate2_id = 0; f.cate3_id = 0; }
+    else { f.cate1_id = id; f.cate2_id = 0; f.cate3_id = 0; }
+  } else if (level === 2) {
+    if (f.cate2_id === id) { f.cate2_id = 0; f.cate3_id = 0; }
+    else { f.cate2_id = id; f.cate3_id = 0; }
+  } else if (level === 3) {
+    f.cate3_id = f.cate3_id === id ? 0 : id;
+  }
+
+  renderCateTree();
+  loadFilter(1);
+});
+
+document.getElementById("labelList").addEventListener("click", e => {
+  const el = e.target.closest("[data-label]");
+  if (!el) return;
+  const id = +el.dataset.label;
+  state.filters.label_id = state.filters.label_id === id ? 0 : id;
+  renderLabelList();
+  loadFilter(1);
+});
+
+// ================= 事件：搜索 =================
+const onSearch = debounce(() => {
+  const v = document.getElementById("searchInput").value.trim();
+  state.search = v;
+  loadFilter(1);
+}, 300);
+document.getElementById("searchInput").addEventListener("input", onSearch);
+
+// ================= 事件：主区域 =================
+document.getElementById("fileGrid").addEventListener("click", e => {
+  const dirCard = e.target.closest(".dir-card");
+  if (dirCard) { showDirMode(dirCard.dataset.prefix); return; }
+
+  const card = e.target.closest(".media-card");
+  if (!card) return;
+
+  const kind = card.dataset.kind;
+  const objectName = card.dataset.object;
+  const title = card.dataset.title;
+
+  if (kind === "other") {
+    window.location.href = `/api/download?object=${encodeURIComponent(objectName)}`;
+    return;
+  }
+  openPreview(objectName, title, kind);
+});
+
+document.getElementById("breadcrumb").addEventListener("click", e => {
+  const a = e.target.closest("a[data-dir]");
+  if (a) { e.preventDefault(); showDirMode(a.dataset.dir); }
+});
+
+document.getElementById("pagination").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-page]");
+  if (btn && !btn.disabled) loadFilter(+btn.dataset.page);
+});
+
+// ================= 预览 =================
+function resetPlayers() {
+  const v = document.getElementById("videoPlayer");
+  const a = document.getElementById("audioPlayer");
+  const img = document.getElementById("imageViewer");
+  const aw = document.getElementById("audioWrap");
+  v.pause(); v.src = ""; v.classList.add("hidden");
+  a.pause(); a.src = ""; a.classList.add("hidden");
+  aw.classList.add("hidden");
+  img.src = ""; img.classList.add("hidden");
+}
+function openPreview(objectName, title, kind) {
+  const modal = document.getElementById("modal");
+  const v = document.getElementById("videoPlayer");
+  const a = document.getElementById("audioPlayer");
+  const aw = document.getElementById("audioWrap");
+  const img = document.getElementById("imageViewer");
+
+  resetPlayers();
+  document.getElementById("modalTitle").textContent = title || objectName.split("/").pop();
+  const url = `/api/preview?object=${encodeURIComponent(objectName)}`;
+
+  if (kind === "video") { v.src = url; v.classList.remove("hidden"); }
+  else if (kind === "audio") { a.src = url; a.classList.remove("hidden"); aw.classList.remove("hidden"); }
+  else if (kind === "image") { img.src = url; img.classList.remove("hidden"); }
+
+  modal.classList.remove("hidden");
+  modal.classList.add("flex");
+  if (kind === "video") v.play().catch(() => {});
+  else if (kind === "audio") a.play().catch(() => {});
+}
+function closeModal() {
+  resetPlayers();
+  document.getElementById("modal").classList.add("hidden");
+  document.getElementById("modal").classList.remove("flex");
+}
+document.getElementById("modalClose").addEventListener("click", closeModal);
+document.getElementById("modal").addEventListener("click", e => {
+  if (e.target.id === "modal") closeModal();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+init();
+</script>
+</body>
+</html>

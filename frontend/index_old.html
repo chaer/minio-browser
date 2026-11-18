@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频文件库</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .category-item { padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 13px; color: #374151; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .category-item:hover { background: #f3f4f6; }
+  .category-item.active { background: #dbeafe; color: #1e40af; font-weight: 500; }
+  .cat-l2 { padding-left: 22px; font-size: 12.5px; }
+  .cat-l3 { padding-left: 38px; font-size: 12px; color: #4b5563; }
+  .count { color: #9ca3af; font-size: 11px; flex-shrink: 0; }
+  .media-card, .dir-card { transition: box-shadow .15s ease; }
+  .media-card:hover, .dir-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+</style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div class="flex min-h-screen">
+
+  <!-- 侧边栏 -->
+  <aside class="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+    <div class="p-4 border-b border-gray-200">
+      <h1 class="text-lg font-bold text-gray-800">🎬 视频文件库</h1>
+      <p id="bucketInfo" class="text-xs text-gray-500 mt-1">加载中…</p>
+    </div>
+    <div class="flex-1 overflow-y-auto p-2">
+      <div id="categoryTree" class="space-y-0.5"></div>
+    </div>
+  </aside>
+
+  <!-- 主区域 -->
+  <main class="flex-1 flex flex-col min-w-0">
+    <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between gap-4">
+      <nav id="breadcrumb" class="text-sm text-gray-600 truncate"></nav>
+      <div id="pageInfo" class="text-sm text-gray-500 flex-shrink-0"></div>
+    </header>
+    <div class="flex-1 p-6 overflow-auto">
+      <div id="fileGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4"></div>
+      <div id="pagination" class="mt-6 flex justify-center gap-2"></div>
+    </div>
+  </main>
+</div>
+
+<!-- 预览模态框（视频/音频/图片共用） -->
+<div id="modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
+  <div class="bg-white rounded-lg overflow-hidden max-w-4xl w-full mx-4">
+    <div class="flex justify-between items-center p-3 border-b gap-4">
+      <span id="modalTitle" class="font-medium truncate"></span>
+      <button id="modalClose" class="text-gray-500 hover:text-gray-800 text-2xl leading-none flex-shrink-0">&times;</button>
+    </div>
+    <video id="videoPlayer" controls class="w-full max-h-[70vh] bg-black hidden"></video>
+    <div id="audioWrap" class="hidden p-6 bg-gray-900">
+      <div class="flex flex-col items-center gap-4">
+        <div class="text-6xl">🎵</div>
+        <audio id="audioPlayer" controls class="w-full max-w-lg"></audio>
+      </div>
+    </div>
+    <img id="imageViewer" class="w-full max-h-[70vh] object-contain bg-black hidden" alt="">
+  </div>
+</div>
+
+<script>
+const state = {
+  prefix: "",
+  mode: "dir",         // "dir" | "cate"
+  cate: { cate1_id: 0, cate2_id: 0, cate3_id: 0 },
+  page: 1,
+  pagesize: 60,
+  lastCate: { cate1_id: 0, cate2_id: 0, cate3_id: 0 },
+};
+
+// ================= 工具 =================
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+function fmtSize(b) {
+  if (!b) return "0 B";
+  if (b < 1024) return b + " B";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
+  return (b / 1073741824).toFixed(2) + " GB";
+}
+function fmtDuration(s) {
+  if (!s) return "";
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+               : `${m}:${String(sec).padStart(2, "0")}`;
+}
+function getFileKind(name) {
+  const ext = (String(name).split(".").pop() || "").toLowerCase();
+  if (["mp4","webm","mov","avi","mkv","m4v","flv","ts","wmv"].includes(ext)) return "video";
+  if (["mp3","wav","m4a","aac","ogg","flac","opus","wma"].includes(ext)) return "audio";
+  if (["jpg","jpeg","png","gif","webp","bmp","svg","avif"].includes(ext)) return "image";
+  return "other";
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json();
+}
+
+// ================= 初始化 =================
+async function init() {
+  try {
+    const info = await getJSON("/api/info");
+    document.getElementById("bucketInfo").textContent =
+      `bucket: ${info.bucket} · 元数据 ${info.metadata_count} 条`;
+  } catch (e) {
+    document.getElementById("bucketInfo").textContent = "初始化失败";
+  }
+
+  try {
+    const { tree } = await getJSON("/api/categories");
+    renderCategoryTree(tree || []);
+  } catch (e) {
+    document.getElementById("categoryTree").innerHTML =
+      '<p class="text-xs text-red-500 p-2">分类加载失败</p>';
+  }
+
+  showDirMode("");
+}
+
+// ================= 分类树 =================
+function renderCategoryTree(tree) {
+  const box = document.getElementById("categoryTree");
+  let html = `<div class="category-item active" data-type="all">📂 全部文件</div>`;
+  for (const c1 of tree) {
+    html += `<div class="category-item" data-type="cate1" data-id="${c1.id}">
+      📁 <span class="flex-1 truncate">${esc(c1.title)}</span>
+      <span class="count">${c1.count || 0}</span></div>`;
+    for (const c2 of (c1.children || [])) {
+      html += `<div class="category-item cat-l2" data-type="cate2"
+        data-id="${c2.id}" data-cate1="${c1.id}">
+        └ <span class="flex-1 truncate">${esc(c2.title)}</span>
+        <span class="count">${c2.count || 0}</span></div>`;
+      for (const c3 of (c2.children || [])) {
+        html += `<div class="category-item cat-l3" data-type="cate3"
+          data-id="${c3.id}" data-cate1="${c1.id}" data-cate2="${c2.id}">
+          <span class="flex-1 truncate">${esc(c3.title)}</span>
+          <span class="count">${c3.count || 0}</span></div>`;
+      }
+    }
+  }
+  box.innerHTML = html;
+
+  box.querySelectorAll(".category-item").forEach(el => {
+    el.addEventListener("click", () => {
+      box.querySelectorAll(".category-item").forEach(x => x.classList.remove("active"));
+      el.classList.add("active");
+      const t = el.dataset.type;
+      if (t === "all") { showDirMode(""); return; }
+      const cate = {
+        cate1_id: t === "cate1" ? +el.dataset.id : (+el.dataset.cate1 || 0),
+        cate2_id: t === "cate2" ? +el.dataset.id : (+el.dataset.cate2 || 0),
+        cate3_id: t === "cate3" ? +el.dataset.id : 0,
+      };
+      loadCategory(cate, 1);
+    });
+  });
+}
+
+function activeCateLabel() {
+  const el = document.querySelector("#categoryTree .category-item.active");
+  if (!el) return "全部";
+  return el.textContent.replace(/\s*\d+\s*$/, "").replace(/^[📁📂└\s]+/, "").trim();
+}
+
+// ================= 目录模式 =================
+async function showDirMode(prefix) {
+  state.mode = "dir";
+  state.prefix = prefix || "";
+  document.getElementById("pagination").innerHTML = "";
+
+  let data;
+  try {
+    data = await getJSON(`/api/objects?prefix=${encodeURIComponent(state.prefix)}`);
+  } catch (e) {
+    document.getElementById("fileGrid").innerHTML =
+      `<p class="text-red-500 col-span-full text-center py-12">目录加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+
+  renderDirBreadcrumb(state.prefix);
+  document.getElementById("pageInfo").textContent =
+    `${data.dirs.length} 个目录 · ${data.files.length} 个文件`;
+  renderDirFiles(data);
+}
+
+function renderDirBreadcrumb(prefix) {
+  const parts = prefix.split("/").filter(Boolean);
+  let html = `<a href="#" data-dir="" class="text-blue-600 hover:underline">🏠 根目录</a>`;
+  let path = "";
+  for (const p of parts) {
+    path += p + "/";
+    html += `<span class="mx-1 text-gray-400">/</span>
+      <a href="#" data-dir="${esc(path)}" class="text-blue-600 hover:underline">${esc(p)}</a>`;
+  }
+  document.getElementById("breadcrumb").innerHTML = html;
+}
+
+function renderDirFiles(data) {
+  const grid = document.getElementById("fileGrid");
+  let html = "";
+
+  for (const dir of data.dirs) {
+    const name = dir.slice(state.prefix.length).replace(/\/$/, "");
+    html += `
+      <div class="dir-card cursor-pointer bg-white rounded-lg border border-gray-200 p-4 flex flex-col items-center justify-center h-40"
+           data-prefix="${esc(dir)}">
+        <div class="text-4xl mb-2">📁</div>
+        <div class="text-sm font-medium text-gray-700 truncate w-full text-center" title="${esc(name)}">${esc(name)}</div>
+      </div>`;
+  }
+
+  for (const f of data.files) {
+    html += mediaCard({
+      object_name: f.name,
+      cover_object: f.cover_object,
+      title: f.title || f.name.split("/").pop(),
+      cate_2: f.cate_2,
+      cate_3: f.cate_3,
+      real_name: f.real_name,
+      duration: f.duration,
+      file_size: f.size,
+    });
+  }
+
+  grid.innerHTML = html || `<p class="text-gray-500 col-span-full text-center py-12">空目录</p>`;
+}
+
+// ================= 分类模式 =================
+async function loadCategory(cate, page) {
+  state.mode = "cate";
+  state.cate = cate;
+  state.lastCate = cate;
+  state.page = page;
+
+  const qs = new URLSearchParams({
+    cate1_id: cate.cate1_id || 0,
+    cate2_id: cate.cate2_id || 0,
+    cate3_id: cate.cate3_id || 0,
+    page: page,
+    pagesize: state.pagesize,
+  });
+
+  let data;
+  try {
+    data = await getJSON(`/api/objects/by_category?${qs}`);
+  } catch (e) {
+    document.getElementById("fileGrid").innerHTML =
+      `<p class="text-red-500 col-span-full text-center py-12">分类加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+
+  document.getElementById("breadcrumb").innerHTML =
+    `<span class="text-gray-400">分类：</span><span class="font-medium text-gray-800">${esc(activeCateLabel())}</span>`;
+  document.getElementById("pageInfo").textContent =
+    `共 ${data.total} 个文件 · 第 ${data.page} 页`;
+
+  const grid = document.getElementById("fileGrid");
+  grid.innerHTML = data.items.length
+    ? data.items.map(mediaCard).join("")
+    : `<p class="text-gray-500 col-span-full text-center py-12">该分类下暂无文件</p>`;
+
+  renderPagination(data.total, data.page, data.pagesize);
+}
+
+function renderPagination(total, page, size) {
+  const pages = Math.ceil(total / size);
+  const box = document.getElementById("pagination");
+  if (pages <= 1) { box.innerHTML = ""; return; }
+  box.innerHTML = `
+    <button data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}
+      class="px-3 py-1.5 border rounded text-sm bg-white disabled:opacity-40">上一页</button>
+    <span class="px-3 py-1.5 text-sm text-gray-600">${page} / ${pages}</span>
+    <button data-page="${page + 1}" ${page >= pages ? "disabled" : ""}
+      class="px-3 py-1.5 border rounded text-sm bg-white disabled:opacity-40">下一页</button>`;
+}
+
+// ================= 媒体卡片（按类型分支） =================
+function mediaCard(f) {
+  const objectName = f.object_name || "";
+  const name = f.title || objectName.split("/").pop();
+  const kind = getFileKind(objectName);
+  const dur = fmtDuration(f.duration);
+  const size = fmtSize(f.file_size || 0);
+  const subParts = [f.cate_3, dur, size].filter(Boolean);
+  const sub = subParts.join(" · ");
+  const coverUrl = f.cover_object
+    ? `/api/preview?object=${encodeURIComponent(f.cover_object)}`
+    : "";
+
+  let previewHtml = "";
+  let overlayHtml = "";
+  let badgeHtml = "";
+
+  if (kind === "video") {
+    previewHtml = coverUrl
+      ? `<img src="${coverUrl}" loading="lazy" class="w-full h-full object-cover" onerror="this.style.display='none'">`
+      : "";
+    overlayHtml = `
+      <div class="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/50 transition">
+        <span class="text-white text-4xl drop-shadow">▶️</span>
+      </div>`;
+    if (dur) {
+      badgeHtml = `<span class="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">${esc(dur)}</span>`;
+    }
+  } else if (kind === "audio") {
+    previewHtml = coverUrl
+      ? `<img src="${coverUrl}" loading="lazy" class="w-full h-full object-cover opacity-80" onerror="this.style.display='none'">`
+      : `<div class="w-full h-full flex items-center justify-center bg-gradient-to-br from-indigo-500 to-purple-600"><span class="text-6xl">🎵</span></div>`;
+    overlayHtml = `
+      <div class="absolute inset-0 flex items-center justify-center bg-black/10 hover:bg-black/50 transition">
+        <span class="text-white text-4xl drop-shadow">🎧</span>
+      </div>`;
+    if (dur) {
+      badgeHtml = `<span class="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">${esc(dur)}</span>`;
+    }
+  } else if (kind === "image") {
+    previewHtml = `<img src="/api/preview?object=${encodeURIComponent(objectName)}" loading="lazy" class="w-full h-full object-cover">`;
+    overlayHtml = `
+      <div class="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/40 transition">
+        <span class="text-white text-2xl drop-shadow opacity-0 group-hover:opacity-100">🔍</span>
+      </div>`;
+  } else {
+    // other：pdf / zip / json / docx 等，点击直接下载
+    previewHtml = `<div class="w-full h-full flex items-center justify-center bg-gray-200"><span class="text-6xl">📄</span></div>`;
+    overlayHtml = `
+      <div class="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/40 transition">
+        <span class="text-white text-3xl drop-shadow">⬇️</span>
+      </div>`;
+  }
+
+  const kindLabel = { video: "视频", audio: "音频", image: "图片", other: "文件" }[kind];
+  const titleAttr = kind === "other"
+    ? `点击下载 · ${kindLabel} · ${size}`
+    : `点击预览 · ${kindLabel}${dur ? " · " + dur : ""} · ${size}`;
+
+  return `
+    <div class="media-card group bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col cursor-pointer"
+         data-object="${esc(objectName)}" data-title="${esc(name)}" data-kind="${kind}"
+         title="${esc(titleAttr)}">
+      <div class="relative aspect-video bg-gray-900 overflow-hidden">
+        ${previewHtml}
+        ${overlayHtml}
+        ${badgeHtml}
+      </div>
+      <div class="p-3">
+        <div class="text-sm font-medium text-gray-800 truncate" title="${esc(name)}">${esc(name)}</div>
+        ${sub ? `<div class="text-xs text-gray-500 mt-1 truncate">${esc(sub)}</div>` : ""}
+        ${f.real_name ? `<div class="text-xs text-gray-400 mt-0.5 truncate">👤 ${esc(f.real_name)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+// ================= 事件委托 =================
+document.getElementById("fileGrid").addEventListener("click", e => {
+  const dirCard = e.target.closest(".dir-card");
+  if (dirCard) { showDirMode(dirCard.dataset.prefix); return; }
+
+  const card = e.target.closest(".media-card");
+  if (!card) return;
+
+  const kind = card.dataset.kind;
+  const objectName = card.dataset.object;
+  const title = card.dataset.title;
+
+  if (kind === "other") {
+    // 其他类型直接下载
+    window.location.href = `/api/download?object=${encodeURIComponent(objectName)}`;
+    return;
+  }
+  openPreview(objectName, title, kind);
+});
+
+document.getElementById("breadcrumb").addEventListener("click", e => {
+  const a = e.target.closest("a[data-dir]");
+  if (a) { e.preventDefault(); showDirMode(a.dataset.dir); }
+});
+
+document.getElementById("pagination").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-page]");
+  if (btn && !btn.disabled) loadCategory(state.lastCate, +btn.dataset.page);
+});
+
+// ================= 预览（视频/音频/图片） =================
+function resetPlayers() {
+  const v = document.getElementById("videoPlayer");
+  const a = document.getElementById("audioPlayer");
+  const img = document.getElementById("imageViewer");
+  const aWrap = document.getElementById("audioWrap");
+
+  v.pause(); v.src = ""; v.classList.add("hidden");
+  a.pause(); a.src = ""; a.classList.add("hidden");
+  aWrap.classList.add("hidden");
+  img.src = ""; img.classList.add("hidden");
+}
+
+function openPreview(objectName, title, kind) {
+  const modal = document.getElementById("modal");
+  const v = document.getElementById("videoPlayer");
+  const a = document.getElementById("audioPlayer");
+  const aWrap = document.getElementById("audioWrap");
+  const img = document.getElementById("imageViewer");
+
+  resetPlayers();
+  document.getElementById("modalTitle").textContent = title || objectName.split("/").pop();
+
+  const url = `/api/preview?object=${encodeURIComponent(objectName)}`;
+
+  if (kind === "video") {
+    v.src = url;
+    v.classList.remove("hidden");
+  } else if (kind === "audio") {
+    a.src = url;
+    a.classList.remove("hidden");
+    aWrap.classList.remove("hidden");
+  } else if (kind === "image") {
+    img.src = url;
+    img.classList.remove("hidden");
+  }
+
+  modal.classList.remove("hidden");
+  modal.classList.add("flex");
+
+  if (kind === "video") v.play().catch(() => {});
+  else if (kind === "audio") a.play().catch(() => {});
+}
+
+function closeModal() {
+  resetPlayers();
+  const modal = document.getElementById("modal");
+  modal.classList.add("hidden");
+  modal.classList.remove("flex");
+}
+
+document.getElementById("modalClose").addEventListener("click", closeModal);
+document.getElementById("modal").addEventListener("click", e => {
+  if (e.target.id === "modal") closeModal();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeModal();
+});
+
+init();
+</script>
+</body>
+</html>
